@@ -6,7 +6,7 @@ Python bot built with [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegram
 
 - Reads private chats made available to the bot through Telegram Business chatbot/secretary automation.
 - Also supports ordinary bot chats where the bot is directly present.
-- Mirrors all message content types supported by `telebot` through catch-all regular and Business handlers.
+- Mirrors all message content types supported by `telebot` through catch-all regular and Business handlers. For Business messages the bot re-sends content by `file_id`/text instead of relying on ordinary `forwardMessage`, because Business chats are separate from normal bot chats.
 - Sends two notifications for each message:
   1. Telegram forward/copy of the original message when the Bot API allows it.
   2. Detailed metadata with sent time, user ID, first name, last name, username, chat ID, message ID, business connection ID, and content type.
@@ -18,7 +18,7 @@ Python bot built with [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegram
 
 - The bot must have Business Mode enabled in BotFather.
 - Connect it from the Telegram account whose private chats you want to monitor: **Settings → Business → Chatbots**.
-- Grant access to the chats you want the bot to process.
+- Grant access to the chats you want the bot to process, including permission to read messages. If Telegram only delivers deletion events, reconnect the bot in Business settings and check the granted chat access/rights.
 - For Business deletion updates, Telegram sends chat ID and message IDs, but not the full original deleted message object. This bot replies to the earlier mirrored notification when it has it in memory, so the sender details remain visible in the thread.
 - The in-memory message map is reset when the process restarts. Use persistent storage if you need deletion/edit replies to survive restarts.
 

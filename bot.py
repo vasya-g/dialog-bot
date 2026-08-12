@@ -30,6 +30,7 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 # Maps original (chat_id, message_id) to the first notification message sent to
 # the owner. It lets edited-message notifications reply to the old copy.
 mirrored_messages: dict[tuple[str, int, int], int] = {}
+message_senders: dict[tuple[str, int, int], str] = {}
 
 # Buffers media groups because Telegram sends album items as separate updates.
 album_buffer: DefaultDict[str, list[types.Message]] = defaultdict(list)
@@ -140,8 +141,79 @@ def format_message_info(message: types.Message, event: str = "New message") -> s
     )
 
 
+def send_manual_copy(message: types.Message, reply_to_message_id: int | None = None) -> int:
+    """Re-send Business messages by file_id/text when forward/copy is unavailable."""
+    common = {"reply_to_message_id": reply_to_message_id}
+    caption = getattr(message, "caption", None)
+
+    if message.content_type == "text":
+        sent = bot.send_message(OWNER_CHAT_ID, message.text or "", **common)
+    elif message.content_type == "photo":
+        sent = bot.send_photo(OWNER_CHAT_ID, message.photo[-1].file_id, caption=caption, **common)
+    elif message.content_type == "audio":
+        sent = bot.send_audio(OWNER_CHAT_ID, message.audio.file_id, caption=caption, **common)
+    elif message.content_type == "document":
+        sent = bot.send_document(OWNER_CHAT_ID, message.document.file_id, caption=caption, **common)
+    elif message.content_type == "video":
+        sent = bot.send_video(OWNER_CHAT_ID, message.video.file_id, caption=caption, **common)
+    elif message.content_type == "animation":
+        sent = bot.send_animation(OWNER_CHAT_ID, message.animation.file_id, caption=caption, **common)
+    elif message.content_type == "voice":
+        sent = bot.send_voice(OWNER_CHAT_ID, message.voice.file_id, caption=caption, **common)
+    elif message.content_type == "video_note":
+        sent = bot.send_video_note(OWNER_CHAT_ID, message.video_note.file_id, **common)
+    elif message.content_type == "sticker":
+        sent = bot.send_sticker(OWNER_CHAT_ID, message.sticker.file_id, **common)
+    elif message.content_type == "location":
+        sent = bot.send_location(
+            OWNER_CHAT_ID,
+            message.location.latitude,
+            message.location.longitude,
+            **common,
+        )
+    elif message.content_type == "contact":
+        sent = bot.send_contact(
+            OWNER_CHAT_ID,
+            message.contact.phone_number,
+            message.contact.first_name,
+            last_name=message.contact.last_name,
+            **common,
+        )
+    elif message.content_type == "venue":
+        sent = bot.send_venue(
+            OWNER_CHAT_ID,
+            message.venue.location.latitude,
+            message.venue.location.longitude,
+            message.venue.title,
+            message.venue.address,
+            **common,
+        )
+    elif message.content_type == "dice":
+        sent = bot.send_dice(OWNER_CHAT_ID, emoji=message.dice.emoji, **common)
+    elif message.content_type == "poll":
+        sent = bot.send_poll(
+            OWNER_CHAT_ID,
+            message.poll.question,
+            [option.text for option in message.poll.options],
+            is_anonymous=message.poll.is_anonymous,
+            allows_multiple_answers=message.poll.allows_multiple_answers,
+            **common,
+        )
+    else:
+        sent = bot.send_message(
+            OWNER_CHAT_ID,
+            "Unsupported message body for manual copy; see metadata below.",
+            **common,
+        )
+
+    return sent.message_id
+
+
 def copy_or_forward_message(message: types.Message, reply_to_message_id: int | None = None) -> int | None:
-    """Forward the message to preserve Telegram navigation, falling back to copy."""
+    """Forward/copy regular messages; manually re-send Business messages."""
+    if getattr(message, "business_connection_id", None):
+        return send_manual_copy(message, reply_to_message_id)
+
     try:
         forwarded = bot.forward_message(
             OWNER_CHAT_ID,
@@ -178,9 +250,17 @@ def mirror_message(message: types.Message, event: str = "New message") -> None:
     business_connection_id = getattr(message, "business_connection_id", None) or "regular"
     original_key = (business_connection_id, message.chat.id, message.message_id)
     previous_owner_message_id = mirrored_messages.get(original_key)
-    owner_copy_id = copy_or_forward_message(message, previous_owner_message_id)
-    metadata_id = send_metadata(message, event, owner_copy_id or previous_owner_message_id)
+    metadata_id = send_metadata(message, event, previous_owner_message_id)
+    try:
+        owner_copy_id = copy_or_forward_message(message, metadata_id)
+    except telebot.apihelper.ApiTelegramException as error:
+        owner_copy_id = bot.send_message(
+            OWNER_CHAT_ID,
+            f"Could not mirror message body: <code>{escape(str(error))}</code>",
+            reply_to_message_id=metadata_id,
+        ).message_id
     mirrored_messages[original_key] = owner_copy_id or metadata_id
+    message_senders[original_key] = format_user(message.from_user)
 
 
 def flush_album(media_group_id: str) -> None:
@@ -226,6 +306,26 @@ def handle_edited_message(message: types.Message) -> None:
     mirror_message(message, "Message edited")
 
 
+@bot.business_connection_handler(func=lambda _: True)
+def handle_business_connection(connection: types.BusinessConnection) -> None:
+    """Notify the owner when the Business connection changes."""
+    user = getattr(connection, "user", None)
+    rights = getattr(connection, "rights", None)
+    bot.send_message(
+        OWNER_CHAT_ID,
+        "\n".join(
+            [
+                "<b>Business connection updated</b>",
+                f"<b>Business connection:</b> <code>{escape(connection.id)}</code>",
+                f"<b>Enabled:</b> <code>{getattr(connection, 'is_enabled', 'unknown')}</code>",
+                format_user(user),
+                f"<b>Rights:</b> <code>{escape(str(rights or '—'))}</code>",
+            ]
+        ),
+        disable_web_page_preview=True,
+    )
+
+
 @bot.business_message_handler(content_types=ALL_CONTENT_TYPES)
 def handle_business_message(message: types.Message) -> None:
     """Catch messages from private chats connected through Telegram Business."""
@@ -251,8 +351,10 @@ def format_deleted_business_message(deleted: types.BusinessMessagesDeleted, mess
             f"<b>Chat:</b> {escape(deleted.chat.title or deleted.chat.first_name or str(deleted.chat.id))}",
             f"<b>Chat ID:</b> <code>{deleted.chat.id}</code>",
             f"<b>Deleted message ID:</b> <code>{message_id}</code>",
-            "<b>User data:</b> Telegram does not include the original sender in the deletion update; "
-            "see the earlier mirrored message above when available.",
+            message_senders.get(
+                (deleted.business_connection_id, deleted.chat.id, message_id),
+                "<b>User data:</b> not available; the message was not mirrored in this process.",
+            ),
         ]
     )
 
@@ -278,6 +380,7 @@ if __name__ == "__main__":
         allowed_updates=[
             "message",
             "edited_message",
+            "business_connection",
             "business_message",
             "edited_business_message",
             "deleted_business_messages",
