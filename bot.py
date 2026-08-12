@@ -2,8 +2,8 @@
 
 The bot copies/forwards every message it can receive to the configured owner
 chat and sends a metadata notification. Telegram's Bot API does not expose
-message deletion events, so deletion notifications cannot be implemented
-reliably with a standard bot token.
+regular message deletion events. Telegram Business, however, sends
+deleted_business_messages updates for connected private chats.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
 # Maps original (chat_id, message_id) to the first notification message sent to
 # the owner. It lets edited-message notifications reply to the old copy.
-mirrored_messages: dict[tuple[int, int], int] = {}
+mirrored_messages: dict[tuple[str, int, int], int] = {}
 
 # Buffers media groups because Telegram sends album items as separate updates.
 album_buffer: DefaultDict[str, list[types.Message]] = defaultdict(list)
@@ -133,6 +133,7 @@ def format_message_info(message: types.Message, event: str = "New message") -> s
             f"<b>Chat:</b> {escape(message.chat.title or message.chat.first_name or str(message.chat.id))}",
             f"<b>Chat ID:</b> <code>{message.chat.id}</code>",
             f"<b>Message ID:</b> <code>{message.message_id}</code>",
+            f"<b>Business connection:</b> <code>{escape(str(getattr(message, 'business_connection_id', '—') or '—'))}</code>",
             f"<b>Type:</b> <code>{escape(message.content_type)}</code>",
             format_user(message.from_user),
         ]
@@ -174,7 +175,8 @@ def mirror_message(message: types.Message, event: str = "New message") -> None:
     if message.from_user and message.from_user.is_bot:
         return
 
-    original_key = (message.chat.id, message.message_id)
+    business_connection_id = getattr(message, "business_connection_id", None) or "regular"
+    original_key = (business_connection_id, message.chat.id, message.message_id)
     previous_owner_message_id = mirrored_messages.get(original_key)
     owner_copy_id = copy_or_forward_message(message, previous_owner_message_id)
     metadata_id = send_metadata(message, event, owner_copy_id or previous_owner_message_id)
@@ -220,10 +222,64 @@ def handle_message(message: types.Message) -> None:
 
 @bot.edited_message_handler(content_types=ALL_CONTENT_TYPES)
 def handle_edited_message(message: types.Message) -> None:
-    """Send edited messages as replies to the previous mirrored notification."""
+    """Send edited regular messages as replies to the previous mirrored notification."""
     mirror_message(message, "Message edited")
+
+
+@bot.business_message_handler(content_types=ALL_CONTENT_TYPES)
+def handle_business_message(message: types.Message) -> None:
+    """Catch messages from private chats connected through Telegram Business."""
+    if buffer_album_message(message):
+        return
+    mirror_message(message, "New business message")
+
+
+@bot.edited_business_message_handler(content_types=ALL_CONTENT_TYPES)
+def handle_edited_business_message(message: types.Message) -> None:
+    """Catch edited messages from Telegram Business private chats."""
+    mirror_message(message, "Business message edited")
+
+
+def format_deleted_business_message(deleted: types.BusinessMessagesDeleted, message_id: int) -> str:
+    """Build a deletion notification for a Telegram Business deleted message."""
+    deleted_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return "\n".join(
+        [
+            "<b>Business message was deleted</b>",
+            f"<b>Deleted at:</b> {deleted_at}",
+            f"<b>Business connection:</b> <code>{escape(deleted.business_connection_id)}</code>",
+            f"<b>Chat:</b> {escape(deleted.chat.title or deleted.chat.first_name or str(deleted.chat.id))}",
+            f"<b>Chat ID:</b> <code>{deleted.chat.id}</code>",
+            f"<b>Deleted message ID:</b> <code>{message_id}</code>",
+            "<b>User data:</b> Telegram does not include the original sender in the deletion update; "
+            "see the earlier mirrored message above when available.",
+        ]
+    )
+
+
+@bot.deleted_business_messages_handler(func=lambda _: True)
+def handle_deleted_business_messages(deleted: types.BusinessMessagesDeleted) -> None:
+    """Notify the owner when Telegram Business reports deleted private-chat messages."""
+    for message_id in deleted.message_ids:
+        original_key = (deleted.business_connection_id, deleted.chat.id, message_id)
+        previous_owner_message_id = mirrored_messages.get(original_key)
+        bot.send_message(
+            OWNER_CHAT_ID,
+            format_deleted_business_message(deleted, message_id),
+            reply_to_message_id=previous_owner_message_id,
+            disable_web_page_preview=True,
+        )
 
 
 if __name__ == "__main__":
     print("Bot is running. Press Ctrl+C to stop.")
-    bot.infinity_polling(skip_pending=True, allowed_updates=["message", "edited_message"])
+    bot.infinity_polling(
+        skip_pending=True,
+        allowed_updates=[
+            "message",
+            "edited_message",
+            "business_message",
+            "edited_business_message",
+            "deleted_business_messages",
+        ],
+    )

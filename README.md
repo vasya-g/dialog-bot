@@ -1,20 +1,26 @@
-# Telegram message mirror bot
+# Telegram Business secretary mirror bot
 
-Python bot built with [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI) that mirrors incoming Telegram updates to the configured owner chat.
+Python bot built with [pyTelegramBotAPI](https://github.com/eternnoir/pyTelegramBotAPI) for Telegram Business “secretary/chatbot” mode. When you connect the bot in **Telegram Settings → Business → Chatbots** and give it access to your private chats, Telegram sends those personal-chat events to the bot as Business updates.
 
 ## Features
 
-- Works in private chats, groups, supergroups, and channels where the bot receives updates.
-- Mirrors all message content types supported by `telebot` through a catch-all handler.
+- Reads private chats made available to the bot through Telegram Business chatbot/secretary automation.
+- Also supports ordinary bot chats where the bot is directly present.
+- Mirrors all message content types supported by `telebot` through catch-all regular and Business handlers.
 - Sends two notifications for each message:
-  1. Telegram forward/copy of the original message.
-  2. Detailed metadata with sent time, user ID, first name, last name, username, chat ID, message ID, and content type.
-- Handles edited messages by sending the edited copy and replying to the previously mirrored notification when possible.
+  1. Telegram forward/copy of the original message when the Bot API allows it.
+  2. Detailed metadata with sent time, user ID, first name, last name, username, chat ID, message ID, business connection ID, and content type.
+- Handles edited regular and Business messages by sending the edited copy and replying to the previously mirrored notification when possible.
+- Handles Telegram Business deletion updates (`deleted_business_messages`) and replies to the previously mirrored message with deletion time, chat data, business connection ID, and deleted message ID.
 - Groups photo albums by `media_group_id` and copies all album items correctly.
 
-## Important Telegram limitation
+## Important Telegram Business notes
 
-The Telegram Bot API does **not** deliver an update when an arbitrary user message is deleted from a chat. Because of that, a normal `telebot` bot cannot reliably detect deleted messages or send deletion-time notifications. The code keeps an in-memory mapping of mirrored messages so edit notifications can reply to the older mirrored copy, but delete detection would require an external client/userbot approach that is outside the Bot API.
+- The bot must have Business Mode enabled in BotFather.
+- Connect it from the Telegram account whose private chats you want to monitor: **Settings → Business → Chatbots**.
+- Grant access to the chats you want the bot to process.
+- For Business deletion updates, Telegram sends chat ID and message IDs, but not the full original deleted message object. This bot replies to the earlier mirrored notification when it has it in memory, so the sender details remain visible in the thread.
+- The in-memory message map is reset when the process restarts. Use persistent storage if you need deletion/edit replies to survive restarts.
 
 ## Setup
 
@@ -36,4 +42,4 @@ Edit `.env`:
 python bot.py
 ```
 
-For groups/supergroups, disable privacy mode in BotFather if you want the bot to receive all group messages.
+For ordinary groups/supergroups, disable privacy mode in BotFather if you want the bot to receive all group messages. This is separate from Telegram Business private-chat automation.
